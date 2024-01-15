@@ -13,8 +13,8 @@ import sys
 
 #this code block is for reading in an example data cube, can be turned into functions
 #listing all protostars
-protostar_folders = ['IRAS16253', 'B335', 'HOPS153', 'HOPS370', 'IRAS20126']
-protostar_ind = 1
+protostar_folders = ['IRAS16253', 'B335', 'HOPS153', 'HOPS370', '12_22_23_20126_update'] # 'IRAS20126']
+protostar_ind = 4
 cube_file_list = [glob('Baseline_Subtracted/' + i + '*.fits')[0].replace('\\', '/') for i in protostar_folders] #change the wildcard '*' here!
 
 # Read in a 3-D IFU datacube of interest, and header
@@ -26,9 +26,9 @@ jwst_cube = SpectralCube.read(hdul[0]) #accessing the cube for data
 
 # define the wavelength grid (microns)
 #[FeI] - CO v10 P23 = 4.8891387 - 4.886926 = 0.002127 mic
-# offset_list = [1.825e-3, 2e-3, 9.75e-4, 1.05e-3, 1.825e-3] #done by hand
-offset_list = [1.85e-3, 2e-3, 1.1e-3, 1.1e-3, 2.25e-3]  #experimental
 # offset_list = [7.5e-5, 0.0002, -0.0005, -0.0006, 0.00045] #experimental including baseline fits with some influence by dan
+# offset_list = [0.00012, 0.00019, -0.00041, -0.00036, 0.00011] #ones I found by hand in a single high S/N aperture similar to Dan
+offset_list = [1.85e-3, 2e-3, 1.1e-3, 1.1e-3, 2.25e-3]  #best ones I found so far
 wave_offset = offset_list[protostar_ind] #unit = microns, alt value is 2e-4 microns, while cdelt is about E-9 m or E-3 mic...
 wave_units = 1e6 #if you need to convert from meters to microns
 wave = wave_units * jwst_cube.spectral_axis.value + wave_offset
@@ -43,9 +43,9 @@ After following the same continuum steps, the next steps are:
 '''
 
 #reformat and compute ions (aka atomic lines), again, non-simultaneous
-line_list_path = 'Line list 2.1 for python.xlsx' #first, note formatting properties from excel file, order: continuum, ices, ions, hydrogen, CO
+line_list_path = 'Line list 2.2 for python(reduced).xlsx' #first, note formatting properties from excel file, order: continuum, ices, ions, hydrogen, CO
 unres_line_sheets = [1,2,3]
-skiprow_list = [None, range(66, 526), range(117, 286)] #IMPORTANT: likely need to modify by hand: range(213, 286) for CO is 3-2; 117 to 213 is 2-1
+skiprow_list = [None, range(66, 526), None] #IMPORTANT: likely need to modify by hand: range(213, 286) for CO is 3-2; 117 to 213 is 2-1
 unres_line_list = [pd.read_excel(line_list_path, sheet_name=unres_line_sheets[i], skiprows=skiprow_list[i]) 
                    for i in range(len(unres_line_sheets))] #read in excel here, separate reads for each sheet is best
 unres_line_list = [i[i['Wv, microns']<= max(wave)] for i in unres_line_list] #IMPORTANT: filtering out MIRI wavelengths
@@ -216,9 +216,12 @@ cube_file_list = [glob(i + '*.fits')[0].replace('\\', '/') for i in protostar_fo
 orig_path = cube_file_list[protostar_ind]
 hdul = fits.open(orig_path)
 orig_cube = SpectralCube.read(hdul[1]) #accessing the cube for data  
-orig_data = orig_cube._data[1:-1, :, :] #need to invoke original cutoff...
-err_data = hdul['ERR'].data[1:-1, :, :] #needed for chi^2...converting to torch 
-
+if protostar_ind != 4: #need to invoke original cutoff...but modded slightly for IRAS 20126...
+    orig_data = orig_cube._data[1:-1, :, :] 
+    err_data = hdul['ERR'].data[1:-1, :, :] #needed for chi^2...converting to torch 
+elif protostar_ind == 4:
+    orig_data = orig_cube._data[2:-1, :, :] 
+    err_data = hdul['ERR'].data[2:-1, :, :] #needed for chi^2...converting to torch 
 
 #to save residuals and comparisons, we need something that sums over all lines at a given wavelength, like we did for purpose of fitting
 #redo einsum here b/c we want a different summation...
@@ -294,7 +297,7 @@ for i in range(len(contaminated_line_list)):
     redist_stacked_coeffs[line_ind,:,:] = torch.where(contaminated_line_leak > redist_stacked_coeffs[line_ind,:,:], \
                                                       contaminated_line_leak, redist_stacked_coeffs[line_ind,:,:])
     #(implicit extra case is if the original positive but leakage negative, ignore the leakage...)
-    #once we've done all this, then we're safe to reassign the contaminated index with the average value...
+    #once we've done all this, then we're safe to reassign the index of the contaminator with the average value of neighboring lines...
     redist_stacked_coeffs[contam_ind,:,:] = contam_average #assign the average to the CO index now that we've stored the varaible
 
 
@@ -308,6 +311,18 @@ precorrec_cube_savepath = 'Ices/'
 precorrec_cube_name = protostar_id + '_GasLines_corrected.fits'
 precorrec_cube.write(precorrec_cube_savepath+precorrec_cube_name, format='fits', overwrite=True)
 print('Saved: ', precorrec_cube_savepath+precorrec_cube_name)
+
+
+#also gets us the cube of pure line emission; BEFORE flux redistribution...primarily for myself
+co_unres_fit = torch.einsum('ijk,il->ljk', redist_stacked_coeffs[len(ion_wavelengths)+len(hydrogen_wavelengths):, :, :].float(), \
+                                            unres_exp[len(ion_wavelengths)+len(hydrogen_wavelengths):].float()).float()
+# precorrecline_data = orig_cube - unres_fit_round1
+co_cube = SpectralCube(data=co_unres_fit*u.MJy/u.sr, wcs=jwst_cube.wcs)
+co_cube_savepath = 'Ices/'
+co_cube_name = protostar_id + '_COLines_corrected.fits'
+co_cube.write(co_cube_savepath+co_cube_name, format='fits', overwrite=True)
+print('Saved: ', co_cube_savepath+co_cube_name)
+
 
 #first, saving line-subtracted cubes; to be done BEFORE flux redistribution...primarily for leiden group -> Ices directory
 noline_data = orig_data - redist_unres_fit.numpy()
@@ -409,7 +424,8 @@ print('Saved: Line Profiles')
 on units: delta_lambda/lambda = delta_nu / nu = 1/R
 per sr...can just convert to per pix and then sum that...
 '''
-cube_units = 5.370000028051437e-6 / torch.tensor(wave[None,:], dtype=torch.float)**2. #conversions here include MJy, c, Jy to cgs, and spectral resolution, but then divide by lambda^2 for correct units...
+# cube_units = 5.370000028051437e-6 / torch.tensor(wave[None,:], dtype=torch.float)**2. #conversions here include MJy, c, Jy to cgs, and spectral resolution, but then divide by lambda^2 for correct units...
+cube_units = 0.0029999999999999996 / torch.tensor(wave[None,:], dtype=torch.float) #coeff from  1e6 * 1e-23 * 3e14 similar to above but no delta_lambda
 sum_unres_fit = torch.einsum('ijk,il->ijk', redist_stacked_coeffs[:len(unres_wavelengths), :, :].float(), cube_units.float()*unres_exp.float()).float()
 line_sum_cube = torch.clone(sum_unres_fit) #filling in cube of lines, producing 2D slices by summing along axis for each line
 
